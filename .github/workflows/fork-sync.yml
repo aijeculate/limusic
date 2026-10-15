@@ -1,0 +1,202 @@
+name: Fork sync + Windows build
+
+# Keeps this fork's `local-api` branch (the opt-in Local API) on top of upstream limusic, and builds
+# a Windows installer whenever that brings in something new.
+#
+#   1. sync:  rebase local-api onto SimoHypers/limusic `dev`. Nothing new upstream = nothing to do.
+#             A conflict fails the job (GitHub emails you) and pushes nothing.
+#   2. build: NSIS installer, attached to a release on this fork. "Watch > Custom > Releases" on the
+#             fork to get an email for each one.
+#
+# One-time setup (see docs in the commit that added this file):
+#   - Fork Settings > General > Default branch = local-api   (schedules only run on the default branch)
+#   - Secret SYNC_TOKEN: fine-grained PAT for this fork with Contents + Workflows read/write. The
+#     built-in token may not push commits that touch .github/workflows, and upstream edits theirs.
+#   - Actions tab: disable upstream's own workflows (checks, *-release, stream-health, website).
+#
+# The steps below mirror upstream's windows-release.yml (libmpv import lib, pinned Tauri CLI), minus
+# update signing: that needs the maintainer's private key, so updater artifacts are switched off.
+
+on:
+  schedule:
+    - cron: "17 5 * * *" # daily, 05:17 UTC
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Build an installer even if upstream has nothing new
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/SimoHypers/limusic.git
+  UPSTREAM_BRANCH: dev
+  BRANCH: local-api
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      changed: ${{ steps.rebase.outputs.changed }}
+      sha: ${{ steps.rebase.outputs.sha }}
+      upstream: ${{ steps.rebase.outputs.upstream }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Rebase onto upstream
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${{ secrets.SYNC_TOKEN }}" ] || { echo "::error::SYNC_TOKEN secret is not set"; exit 1; }
+          git config user.name "fork-sync"
+          git config user.email "fork-sync@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          UP="$(git rev-parse --short upstream/$UPSTREAM_BRANCH)"
+          echo "upstream=$UP" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" HEAD; then
+            echo "Already on top of upstream $UPSTREAM_BRANCH ($UP), nothing to sync."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            if ! git rebase "upstream/$UPSTREAM_BRANCH"; then
+              echo "::error::Upstream changed lines the Local API also changes. Rebase by hand: git fetch upstream && git rebase upstream/$UPSTREAM_BRANCH"
+              git diff --name-only --diff-filter=U | sed 's/^/::error::conflict in /'
+              git rebase --abort
+              exit 1
+            fi
+            git push --force-with-lease origin "HEAD:$BRANCH"
+            echo "Rebased onto upstream $UPSTREAM_BRANCH ($UP)."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || inputs.force_build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Upstream's pinned libmpv (their windows-release.yml): a known-good DLL with no GPU-driver imports.
+      MPV_DEV_URL: https://github.com/SimoHypers/limusic/releases/download/deps/libmpv-2-x86_64-20260610-git-304426c.7z
+      MPV_DEV_SHA256: af708edcdf6ed12ac7b2bb31b4cbeba0bf7d4eef345a715ef5de782c0ddd6671
+      MPV_DIR: ${{ github.workspace }}\.libmpv
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          persist-credentials: false
+
+      - name: Bake in the player-cipher registry (never fatal)
+        shell: bash
+        run: |
+          tmp="$(mktemp)"
+          for url in \
+            https://raw.githubusercontent.com/MetrolistGroup/faraday/master/registry/player_configs.json \
+            https://raw.githubusercontent.com/ZemerTeam/zemer-cipher/master/library/src/main/assets/player_configs.json; do
+            if curl -fsSL --max-time 30 "$url" -o "$tmp" && jq -e '(.players | objects | length) > 0' "$tmp" >/dev/null 2>&1; then
+              cp "$tmp" src-tauri/cipher_configs.json; echo "bundled player configs from $url"; exit 0
+            fi
+          done
+          echo "::warning::no player-cipher registry reachable; the app fetches it at runtime"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Frontend deps
+        shell: bash
+        run: cd ui && pnpm install --frozen-lockfile
+
+      - name: Rust (MSVC)
+        shell: bash
+        run: rustup default stable-msvc
+
+      # Before rust-cache, so the cache key and cargo's fingerprints agree (see upstream's workflow).
+      - name: RUSTFLAGS (libmpv link path)
+        shell: bash
+        run: echo "RUSTFLAGS=-L native=${{ github.workspace }}\.libmpv" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Tauri CLI (pinned like upstream)
+        shell: bash
+        run: npm install -g "@tauri-apps/cli@2.11.5"
+
+      - name: Build the libmpv import library
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "$env:MPV_DIR" | Out-Null
+          curl.exe -fsSL -o "$env:MPV_DIR\mpv-dev.7z" "$env:MPV_DEV_URL"
+          if ((Get-FileHash "$env:MPV_DIR\mpv-dev.7z" -Algorithm SHA256).Hash -ne $env:MPV_DEV_SHA256) { throw "mpv-dev.7z hash mismatch" }
+          7z x "$env:MPV_DIR\mpv-dev.7z" -o"$env:MPV_DIR" -y | Out-Null
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Set-Location "$env:MPV_DIR"
+          $names = & dumpbin /exports libmpv-2.dll |
+            Select-String -Pattern '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\w+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($names.Count -lt 50) { throw "parsed only $($names.Count) exports from libmpv-2.dll" }
+          @("EXPORTS") + ($names | ForEach-Object { "    $_" }) | Set-Content -Path mpv.def -Encoding ascii
+          & lib /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /machine:x64
+          if (-not (Test-Path mpv.lib)) { throw "lib.exe did not produce mpv.lib" }
+          Copy-Item libmpv-2.dll "$env:GITHUB_WORKSPACE\src-tauri\libmpv-2.dll" -Force
+
+      - name: Build the installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd ui && pnpm build)
+          # No updater artifacts: they must be signed with upstream's private key, which this fork
+          # doesn't have. NSIS only: WiX rejects non-numeric prerelease versions (1.3.0-rc.5).
+          tauri build --bundles nsis \
+            --config '{"build":{"beforeBuildCommand":""},"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Publish a release on this fork
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r .version src-tauri/tauri.conf.json)"
+          SHORT="$(git rev-parse --short HEAD)"
+          TAG="v${VERSION}-localapi-${SHORT}"
+          EXE="$(ls target/release/bundle/nsis/*-setup.exe | head -1)"
+          OUT="limusic_${VERSION}_local-api_${SHORT}_x64-setup.exe"
+          cp "$EXE" "$OUT"
+          gh release create "$TAG" "$OUT" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "${{ needs.sync.outputs.sha }}" \
+            --title "limusic ${VERSION} + Local API (${SHORT})" \
+            --notes "Built from upstream \`${UPSTREAM_BRANCH}\` at ${{ needs.sync.outputs.upstream }} with the Local API on top. Install over your current limusic; settings are kept.
+
+          Decline limusic's own update prompt: an official build doesn't have the Local API." \
+            --latest
+          echo "Published $TAG"
+
+          # Keep the 5 newest builds; each installer is ~150 MB.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | contains("-localapi-"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+            while read -r old; do gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes; done
