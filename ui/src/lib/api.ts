@@ -449,6 +449,19 @@ export const getPlayback = () => invoke<PlaybackSnapshot>('get_playback');
 export const getSettings = () => invoke<Record<string, string>>('get_settings');
 export const setSetting = (key: string, value: string) =>
 	invoke<void>('set_setting', { key, value });
+// --- local control API (src-tauri/src/local_api) -----------------------------------------
+export interface LocalApiStatus {
+	enabled: boolean;
+	port: number;
+	token: string;
+	running: boolean;
+	/** Why it isn't listening although enabled (a taken port, typically). */
+	error: string | null;
+}
+export const localApiStatus = () => invoke<LocalApiStatus>('local_api_status');
+export const localApiConfigure = (enabled: boolean, port: number) =>
+	invoke<LocalApiStatus>('local_api_configure', { enabled, port });
+export const localApiRegenerateToken = () => invoke<LocalApiStatus>('local_api_regenerate_token');
 /** Streamable client keys for the "disabled clients" setting. */
 export const getStreamClients = () => invoke<string[]>('get_stream_clients');
 /** Wipe both cache tiers (URL cache + mpv on-disk audio cache). */

@@ -36,6 +36,7 @@
 	import Changelog from '$lib/components/Changelog.svelte';
 	import DiscordSettings from '$lib/components/DiscordSettings.svelte';
 	import ScrobbleSettings from '$lib/components/ScrobbleSettings.svelte';
+	import LocalApiSettings from '$lib/components/LocalApiSettings.svelte';
 	import {
 		updateState,
 		availableMessage,
@@ -727,6 +728,7 @@
 								})}
 							</div>
 						</section>
+						<LocalApiSettings />
 						<section class={GROUP}>
 							<h3 class={LABEL}>{t('settings.sections.storage')}</h3>
 							<div class={CARD}>
