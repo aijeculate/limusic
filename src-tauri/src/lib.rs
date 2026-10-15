@@ -17,6 +17,7 @@ mod lastfm;
 mod listenbrainz;
 mod listentogether;
 mod local;
+mod local_api;
 mod lyrics;
 mod matugen;
 mod media;
@@ -748,6 +749,11 @@ pub fn run() {
             // not a custom scheme.
             videoproxy::start(app_state.clone());
 
+            // The opt-in control API for launchers (local_api/). Off unless the user enabled it.
+            let local_api = local_api::LocalApi::default();
+            local_api.apply(&app_state);
+            app.manage(local_api);
+
             // mpv's audio goes through a second loopback socket so the open-ended range ffmpeg
             // sends becomes bounded ranges upstream, which is the difference between 32 KB/s and
             // several MB/s on the same URL. audioproxy.rs has the measurements.
@@ -1074,6 +1080,9 @@ pub fn run() {
             commands::play_playlist,
             commands::start_radio,
             commands::rate,
+            commands::local_api_status,
+            commands::local_api_configure,
+            commands::local_api_regenerate_token,
             commands::set_song_saved,
             commands::set_album_saved,
             commands::add_to_playlist,

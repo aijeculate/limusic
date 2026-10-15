@@ -174,6 +174,13 @@ suggestion.
 
 ---
 
+## Local API
+
+Limusic can expose an opt-in control API on `127.0.0.1` for launchers and scripts (Raycast, Stream
+Deck, shell aliases): playback, now playing, search, queue and library playlists. It is off by
+default; turn it on in **Settings → Data → Local API** and copy the token into your client. See
+[docs/local-api.md](docs/local-api.md) for the endpoint reference.
+
 ## Translations
 
 Limusic is translated on [Weblate](https://hosted.weblate.org/engage/limusic/),
