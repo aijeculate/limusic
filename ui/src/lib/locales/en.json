@@ -456,7 +456,8 @@
 			"discord_links": "Clickable",
 			"discord_buttons": "Buttons",
 			"colors": "Colors",
-			"interface": "Interface"
+			"interface": "Interface",
+			"local_api": "Local API"
 		},
 		"general": {
 			"language": "Interface language",
@@ -803,6 +804,19 @@
 			"lb_problem_email": "Verify your MetaBrainz email so ListenBrainz accepts your listens.",
 			"lb_problem_rejected": "ListenBrainz no longer accepts this token. Connect again with a new one.",
 			"lb_verify_email": "Verify email"
+		},
+		"local_api": {
+			"enable": "Local control API",
+			"enable_hint": "Lets apps on this computer, like Raycast or a Stream Deck, control playback, search and your queue. Listens on 127.0.0.1 only and needs the token below.",
+			"port": "Port",
+			"port_hint": "1024 to 65535. The default is 26538.",
+			"token": "Access token",
+			"token_hint": "Paste this into the app you want to connect. Regenerating it disconnects every app using the old one.",
+			"copy": "Copy",
+			"copied": "Copied",
+			"regenerate": "Regenerate",
+			"running": "Listening on 127.0.0.1:{port}",
+			"apply": "Apply"
 		}
 	},
 	"dialogs": {

@@ -210,6 +210,11 @@ pub async fn seek(state: St<'_>, position: f64) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn set_volume(state: St<'_>, volume: i64) -> Result<(), String> {
+    apply_volume(&state, volume)
+}
+
+/// The volume slider's whole effect, shared with the local API (local_api/routes.rs).
+pub(crate) fn apply_volume(state: &Arc<AppState>, volume: i64) -> Result<(), String> {
     state.player.set_volume(volume).map_err(|e| e.to_string())?;
     if volume > 0 {
         crate::hotkeys::LAST_NONZERO_VOLUME.store(volume, std::sync::atomic::Ordering::Relaxed);
@@ -1124,7 +1129,12 @@ pub async fn comment_delete(state: St<'_>, comment_id: String) -> Result<(), Com
 
 #[tauri::command]
 pub async fn get_library(state: St<'_>) -> Result<Vec<BrowseItem>, String> {
-    let client = metadata_client(&state)?;
+    library_playlists(&state).await
+}
+
+/// The Library page's playlist grid, shared with the local API.
+pub(crate) async fn library_playlists(state: &Arc<AppState>) -> Result<Vec<BrowseItem>, String> {
+    let client = metadata_client(state)?;
     // Signed out there is no YouTube library to ask for (the browse would come back as a sign-in
     // shell), but On Repeat is built from this machine's play history and is still real.
     let mut items = if state.it.is_logged_in() {
@@ -1230,8 +1240,22 @@ pub async fn get_playlist(
     sort: Option<PlaylistSort>,
     desc: Option<bool>,
 ) -> Result<PlaylistPage, String> {
+    playlist_page_sorted(&state, &id, sort, desc).await
+}
+
+/// A playlist page in its account order, for the local API.
+pub(crate) async fn playlist_page(state: &Arc<AppState>, id: &str) -> Result<PlaylistPage, String> {
+    playlist_page_sorted(state, id, None, None).await
+}
+
+async fn playlist_page_sorted(
+    state: &Arc<AppState>,
+    id: &str,
+    sort: Option<PlaylistSort>,
+    desc: Option<bool>,
+) -> Result<PlaylistPage, String> {
     if id == ON_REPEAT_ID {
-        let items = on_repeat_songs(&state);
+        let items = on_repeat_songs(state);
         return Ok(PlaylistPage {
             title: Some("On Repeat".into()),
             subtitle: Some(format!("{} songs you've played most this month", items.len())),
@@ -1247,14 +1271,14 @@ pub async fn get_playlist(
             suggestions: None,
         });
     }
-    if is_local_playlist(&id) {
-        return local_playlist_page(&state, &id);
+    if is_local_playlist(id) {
+        return local_playlist_page(state, id);
     }
-    let client = metadata_client(&state)?;
+    let client = metadata_client(state)?;
     let sort = sort.map(|s| (s, desc.unwrap_or(false)));
-    let mut page = state.it.playlist(client, &id, sort).await.map_err(|e| e.to_string())?;
+    let mut page = state.it.playlist(client, id, sort).await.map_err(|e| e.to_string())?;
     // Alongside YouTube's own thumbnail, not over it: the dialog offers to drop the custom one.
-    page.cover = custom_cover(&state, &id);
+    page.cover = custom_cover(state, id);
     Ok(page)
 }
 
@@ -1378,6 +1402,11 @@ pub async fn get_playlist_suggestions(
 /// An album page. `id` is the album browseId (`MPRE…`).
 #[tauri::command]
 pub async fn get_album(state: St<'_>, id: String) -> Result<AlbumPage, String> {
+    album_page(&state, &id).await
+}
+
+/// An album page with the music-video preference applied, shared with the local API.
+pub(crate) async fn album_page(state: &Arc<AppState>, id: &str) -> Result<AlbumPage, String> {
     // A local album is built from SQLite, so it opens the same page while offline (local.rs).
     if let Some(key) = id.strip_prefix(crate::local::ALBUM_PREFIX) {
         return Ok(crate::local::album_page(&state.db, key));
@@ -1387,8 +1416,8 @@ pub async fn get_album(state: St<'_>, id: String) -> Result<AlbumPage, String> {
     if let Some(name) = id.strip_prefix(crate::local::ARTIST_PREFIX) {
         return Ok(crate::local::artist_page(&state.db, name));
     }
-    let client = metadata_client(&state)?;
-    let mut page = state.it.album(client, &id).await.map_err(|e| e.to_string())?;
+    let client = metadata_client(state)?;
+    let mut page = state.it.album(client, id).await.map_err(|e| e.to_string())?;
     // `album()` hands back the album audio for rows YouTube linked to a music video. With music
     // videos on, those rows play the video, as on YouTube Music, with the song a switch away (#442),
     // unless `videos_first` is off: some videos carry intros and extra scenes the song doesn't (#464).
@@ -1517,11 +1546,20 @@ fn require_login(state: &Arc<AppState>) -> Result<&innertube::YouTubeClient, Str
 /// mutually exclusive, so a dislike un-likes in the same call and the UI never has to send two.
 #[tauri::command]
 pub async fn rate(state: St<'_>, video_id: String, rating: Rating) -> Result<(), String> {
-    let client = require_login(&state)?;
+    rate_track(&state, &video_id, rating).await
+}
+
+/// [`rate`]'s body, shared with the local API.
+pub(crate) async fn rate_track(
+    state: &Arc<AppState>,
+    video_id: &str,
+    rating: Rating,
+) -> Result<(), String> {
+    let client = require_login(state)?;
     // Before the write, not after: a `refresh_rating` round trip already in flight was asked
     // before this rating existed, so its answer is stale from here on either way (issue #93).
     state.rate_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    state.it.rate(client, &video_id, rating).await.map_err(|e| e.to_string())
+    state.it.rate(client, video_id, rating).await.map_err(|e| e.to_string())
 }
 
 /// Add a song to the library (Library ▸ Songs), or take it out. `token` comes from the row's own
@@ -2828,4 +2866,33 @@ mod tests {
         );
         assert_eq!(row.title, played.title, "the song itself survives");
     }
+}
+
+// --- local control API (local_api/) ---------------------------------------------------------
+
+#[tauri::command]
+pub async fn local_api_status(
+    state: St<'_>,
+    api: State<'_, crate::local_api::LocalApi>,
+) -> Result<crate::local_api::Status, String> {
+    Ok(api.status(&state))
+}
+
+/// The settings switch and port field. Starts, stops or rebinds the server on the spot.
+#[tauri::command]
+pub async fn local_api_configure(
+    state: St<'_>,
+    api: State<'_, crate::local_api::LocalApi>,
+    enabled: bool,
+    port: u16,
+) -> Result<crate::local_api::Status, String> {
+    api.configure(state.inner(), enabled, port)
+}
+
+#[tauri::command]
+pub async fn local_api_regenerate_token(
+    state: St<'_>,
+    api: State<'_, crate::local_api::LocalApi>,
+) -> Result<crate::local_api::Status, String> {
+    Ok(api.regenerate_token(state.inner()))
 }
